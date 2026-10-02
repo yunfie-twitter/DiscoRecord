@@ -9,10 +9,12 @@ import re
 import shutil
 import subprocess
 from dataclasses import dataclass
+from pathlib import Path
 
 try:
     import discord
     from discord.voice import VoiceClient
+    from dotenv import load_dotenv
 except (ImportError, OSError) as exc:
     raise SystemExit("Pycord または音声依存関係を読み込めません。requirements.txt をインストールしてください。"
                      f"（{type(exc).__name__}）") from None
@@ -325,9 +327,11 @@ def check_runtime():
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(name)s: %(message)s")
+    # Read only the .env next to main.py; externally set variables take priority.
+    load_dotenv(Path(__file__).resolve().with_name(".env"), override=False, encoding="utf-8-sig")
     token = os.getenv("DISCORD_TOKEN", "").strip()
     if not token:
-        raise SystemExit("環境変数 DISCORD_TOKEN を設定してください。")
+        raise SystemExit(".env または環境変数に DISCORD_TOKEN を設定してください。")
     try:
         check_runtime()
     except Exception as exc:

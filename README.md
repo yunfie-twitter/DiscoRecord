@@ -16,7 +16,32 @@ Pycord の DAVE 受信対応 PR #3159 のコミット
 Message Content Intent や Server Members Intent は不要です。
 サーバー内でコマンドが許可されている利用者は、他の利用者が開始した録音も停止できます。
 
-## インストールと起動（Windows / PowerShell）
+## Docker で起動（推奨）
+
+Docker Engine と Compose v2、または Docker Desktop（Linux コンテナー）を用意します。
+Python、Git、FFmpeg、Opus はイメージ内にインストールされるため、ホストへのインストールは不要です。
+
+同梱の `.env` を編集し、トークンを設定します。Git から取得した場合は `.env.example` を `.env` にコピーしてください。
+
+```dotenv
+DISCORD_TOKEN=取得したBotトークン
+```
+
+作業フォルダーで実行します。
+
+```sh
+docker compose up -d --build
+docker compose logs -f bot
+```
+
+停止は `docker compose down` です。`.env` を変更したら `docker compose up -d --force-recreate` でコンテナーを作り直してください。
+コードや依存関係を変更した場合は `docker compose up -d --build` を実行します。
+録音中に停止・再作成すると未送信の録音は失われるため、先に `/rec stop` で送信完了を確認してください。
+
+`.env` は Compose の `env_file` から実行時に渡します。イメージには含めず、Git にも登録しません。
+Bot は非 root ユーザーで動作します。ポート公開は不要ですが、Discord への HTTPS / WebSocket と音声用の外向き UDP 通信を許可してください。
+
+## ローカルで起動（Windows / PowerShell）
 
 Git と Python をインストールし、作業フォルダーで実行します。
 discord.py と同じ環境にインストールしないでください。
@@ -31,11 +56,12 @@ FFmpeg インストール後はターミナルを開き直し、`ffmpeg -version
 FFmpeg は Python パッケージではなく、別途インストールする実行ファイルです。
 
 ```powershell
-$env:DISCORD_TOKEN = "取得した Bot トークン"
 .\.venv\Scripts\python.exe main.py
 ```
 
-トークンをソースや Git に保存しないでください。Linux では FFmpeg と libopus をインストールしてください。
+ローカル起動でも `main.py` と同じフォルダーの `.env` を自動で読み込みます。
+既に設定されている環境変数を優先します。トークンをソースや Git に保存しないでください。
+Linux では FFmpeg と libopus をインストールしてください。
 Opus の自動検索に失敗する環境では、`OPUS_LIBRARY` に共有ライブラリの絶対パスを設定できます。
 
 ## コマンド
@@ -70,5 +96,6 @@ FFmpeg が PATH にある場合は実際の MP3 変換とデコードも検証�
 
 この作業環境での確認結果は Python 3.14 の固定版インストール、API 読み込み、モック検証、FFmpeg 変換です。
 Python 3.12 および実際の Discord 接続での録音は未検証です。
+Docker CLI がこの作業環境にないため、Docker イメージのビルドとコンテナー起動は未検証です。
 
 参考：[Pycord DAVE 受信対応 PR](https://github.com/Pycord-Development/pycord/pull/3159)
