@@ -7,7 +7,7 @@ import struct
 import subprocess
 import unittest
 from types import SimpleNamespace
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
 import discord
 import main
@@ -79,6 +79,34 @@ class RecorderTests(unittest.IsolatedAsyncioTestCase):
         ctx = SimpleNamespace(guild=SimpleNamespace(id=1), defer=AsyncMock(), respond=AsyncMock())
         await main.stop.callback(ctx)
         self.assertIn("録音していません", ctx.respond.await_args.args[0])
+
+    async def test_start_uses_installed_connect_signature(self):
+        guild = SimpleNamespace(id=1, me=object(), voice_client=None,
+                                change_voice_state=AsyncMock())
+        target = Mock(spec=discord.VoiceChannel)
+        target.permissions_for.return_value = discord.Permissions.all()
+        voice = SimpleNamespace(guild=guild, start_recording=Mock())
+        # Autospec checks the real installed API, rejecting unsupported kwargs.
+        target.connect = create_autospec(discord.VoiceChannel.connect)
+        target.connect.return_value = voice
+        # Bound channel methods do not receive self from the command.
+        async def connect(**kwargs):
+            return await target.connect(target, **kwargs)
+        bound_target = Mock(spec=discord.VoiceChannel)
+        bound_target.permissions_for.return_value = discord.Permissions.all()
+        bound_target.connect = connect
+        channel = Mock(spec=discord.TextChannel)
+        channel.permissions_for.return_value = discord.Permissions.all()
+        channel.send = AsyncMock(return_value=SimpleNamespace(edit=AsyncMock()))
+        ctx = SimpleNamespace(guild=guild, channel=channel, defer=AsyncMock(),
+                              respond=AsyncMock(), author=SimpleNamespace())
+        with patch.object(main, "watch", new=AsyncMock()):
+            await main.start.callback(ctx, bound_target)
+        target.connect.assert_awaited_once_with(target, timeout=30)
+        guild.change_voice_state.assert_awaited_once_with(channel=bound_target, self_deaf=False)
+        voice.start_recording.assert_called_once()
+        self.assertEqual(main.sessions[1].phase, "recording")
+        await main.sessions[1].watchdog
 
     async def test_stop_in_progress(self):
         session = self.session()

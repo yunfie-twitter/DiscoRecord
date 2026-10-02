@@ -241,7 +241,7 @@ async def start(ctx: discord.ApplicationContext,
             else:
                 if vc:
                     await vc.disconnect(force=True)
-                session.voice = await target.connect(timeout=30, self_deaf=False)
+                session.voice = await target.connect(timeout=30)
             await session.voice.guild.change_voice_state(channel=target, self_deaf=False)
             session.message = await ctx.channel.send("🔴 録音中...")
             # Nonempty args are necessary for this revision's callback invocation.
