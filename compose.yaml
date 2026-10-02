@@ -3,6 +3,8 @@ services:
     build: .
     env_file:
       - .env
+    volumes:
+      - ./record:/app/record
     init: true
     restart: unless-stopped
     stop_grace_period: 30s

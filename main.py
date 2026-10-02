@@ -8,8 +8,10 @@ import os
 import re
 import shutil
 import subprocess
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from pathlib import Path
+from uuid import uuid4
 
 try:
     import discord
@@ -26,6 +28,7 @@ intents = discord.Intents.default()
 intents.voice_states = True
 bot = discord.Bot(intents=intents, allowed_mentions=discord.AllowedMentions.none())
 rec = discord.SlashCommandGroup("rec", "ボイスチャンネルの録音", guild_only=True)
+RECORD_DIR = Path(__file__).resolve().parent / "record"
 
 
 class RecordingSink(discord.sinks.MP3Sink):
@@ -78,6 +81,8 @@ class Session:
     task: asyncio.Task | None = None
     watchdog: asyncio.Task | None = None
     failure: str | None = None
+    names: dict[int, str] = field(default_factory=dict)
+    recording_id: str = field(default_factory=lambda: datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%S_%fZ") + "_" + uuid4().hex[:8])
 
 
 sessions: dict[int, Session] = {}
@@ -91,6 +96,39 @@ def lock_for(guild_id: int) -> asyncio.Lock:
 def filename(user_id: int, name: str) -> str:
     safe = re.sub(r'[<>:"/\\|?*\x00-\x1f\x7f]', "_", name).strip(" .")[:80]
     return f"{user_id}_{safe or 'unknown'}.mp3"
+
+
+async def resolve_name(session: Session, user, user_id: int) -> str:
+    member = session.guild.get_member(user_id) or bot.get_user(user_id)
+    name = getattr(user, "name", None) or session.names.get(user_id) or getattr(member, "name", None)
+    if name:
+        return name
+    # Voice receiver keys can be IDs/partial objects absent from the member cache.
+    try:
+        fetched = await bot.fetch_user(user_id)
+        session.names[user_id] = fetched.name
+        return fetched.name
+    except discord.HTTPException:
+        log.exception("Username lookup failed for user %s", user_id)
+        return "unknown"
+
+
+def save_audio(session: Session, name: str, audio) -> Path:
+    directory = RECORD_DIR / str(session.guild.id) / session.recording_id
+    directory.mkdir(parents=True, exist_ok=True)
+    destination = directory / name
+    audio.file.seek(0)
+    try:
+        with destination.open("xb") as output:
+            try:
+                shutil.copyfileobj(audio.file, output)
+            except Exception:
+                output.close()
+                destination.unlink(missing_ok=True)
+                raise
+    finally:
+        audio.file.seek(0)
+    return destination
 
 
 async def status(session: Session, text: str):
@@ -128,7 +166,7 @@ async def finish(session: Session):
     async with lock_for(session.guild.id):
         session.phase = "finishing"
     await status(session, "⏳ 録音終了処理中...")
-    sent = failed = 0
+    sent = failed = saved = save_failed = 0
     try:
         await session.sink.ready.wait()
         await disconnect(session)
@@ -140,15 +178,24 @@ async def finish(session: Session):
             if user_id is None:
                 failed += 1
                 continue
-            member = session.guild.get_member(user_id) or bot.get_user(user_id)
-            name = getattr(user, "name", None) or getattr(member, "name", "unknown")
+            name = await resolve_name(session, user, user_id)
+            audio_name = filename(user_id, name)
             audio.file.seek(0, io.SEEK_END)
             size = audio.file.tell()
-            if size == 0 or size > session.guild.filesize_limit:
+            if size == 0:
+                failed += 1
+                continue
+            try:
+                await asyncio.to_thread(save_audio, session, audio_name, audio)
+                saved += 1
+            except OSError:
+                save_failed += 1
+                log.exception("Recording save failed for user %s", user_id)
+            if size > session.guild.filesize_limit:
                 failed += 1
                 continue
             audio.file.seek(0)
-            attachment = discord.File(audio.file, filename=filename(user_id, name))
+            attachment = discord.File(audio.file, filename=audio_name)
             try:
                 await session.channel.send(file=attachment)
                 sent += 1
@@ -158,12 +205,15 @@ async def finish(session: Session):
             finally:
                 attachment.close()
         text = f"✅ 録音終了。{sent} 人分の MP3 を送信しました。"
+        text += f"\n💾 {saved} 人分を record/{session.guild.id}/{session.recording_id}/ に保存しました。"
         if not session.sink.audio_data:
             text = "⚠️ 録音終了。音声を取得できませんでした（無音・音声受信設定を確認）。"
         if failed:
             text += f"\n⚠️ {failed} 人分は変換失敗・容量超過・送信失敗などで送信できませんでした。"
         if session.failure:
             text += f"\n⚠️ {session.failure}"
+        if save_failed:
+            text += f"\n⚠️ {save_failed} 人分の保存に失敗しました。record の書き込み権限と空き容量を確認してください。"
         await status(session, text)
     except Exception:
         log.exception("Recording finalization failed")
@@ -231,6 +281,7 @@ async def start(ctx: discord.ApplicationContext,
         session = Session(guild, ctx.channel, RecordingSink(asyncio.get_running_loop()))
         sessions[guild.id] = session
         try:
+            session.names.update({member.id: member.name for member in target.members})
             vc = guild.voice_client
             if vc and vc.is_recording():
                 raise RuntimeError("Existing voice client is recording")
@@ -294,6 +345,15 @@ async def stop(ctx: discord.ApplicationContext):
                 session.sink.errors[user] = "stop failed"
             session.sink.ready.set()
         schedule_finish(session)
+
+
+@bot.event
+async def on_voice_state_update(member, before, after):
+    session = sessions.get(member.guild.id)
+    if session and session.voice and (
+        before.channel == session.voice.channel or after.channel == session.voice.channel
+    ):
+        session.names[member.id] = member.name
 
 
 @bot.event

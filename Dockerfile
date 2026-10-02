@@ -22,6 +22,7 @@ RUN apt-get update \
 COPY --from=builder /opt/venv /opt/venv
 WORKDIR /app
 COPY --chown=bot:bot main.py /app/main.py
+RUN mkdir -p /app/record && chown bot:bot /app/record
 USER bot
 
 CMD ["python", "main.py"]

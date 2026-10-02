@@ -5,7 +5,9 @@ import os
 import shutil
 import struct
 import subprocess
+import tempfile
 import unittest
+from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, Mock, create_autospec, patch
 
@@ -17,6 +19,11 @@ class RecorderTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         main.sessions.clear()
         main.locks.clear()
+        self.record_directory = tempfile.TemporaryDirectory()
+        self.addCleanup(self.record_directory.cleanup)
+        self.record_patch = patch.object(main, "RECORD_DIR", Path(self.record_directory.name))
+        self.record_patch.start()
+        self.addCleanup(self.record_patch.stop)
 
     def session(self, guild_id=1):
         guild = SimpleNamespace(id=guild_id, filesize_limit=1000, get_member=lambda _: None)
@@ -49,6 +56,9 @@ class RecorderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.channel.send.await_args.kwargs["file"].filename, "10_user_10.mp3")
         self.assertNotIn(1, main.sessions)
         self.assertTrue(buffer.closed)
+        saved = list(Path(self.record_directory.name).rglob("*.mp3"))
+        self.assertEqual(len(saved), 1)
+        self.assertEqual(saved[0].read_bytes(), b"a" * 100)
 
     async def test_upload_failure_size_and_conversion_error_continue(self):
         session = self.session()
@@ -64,6 +74,46 @@ class RecorderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(session.channel.send.await_count, 2)
         self.assertIn("1 人分", session.message.edit.await_args.kwargs["content"])
         self.assertIn("3 人分", session.message.edit.await_args.kwargs["content"])
+        self.assertFalse(main.sessions)
+        self.assertEqual(len(list(Path(self.record_directory.name).rglob("*.mp3"))), 3)
+
+    async def test_id_only_user_name_fetched_when_not_cached(self):
+        session = self.session()
+        session.sink.audio_data[10] = discord.sinks.AudioData(io.BytesIO(b"mp3"))
+        session.sink.ready.set()
+        with patch.object(main.bot, "get_user", return_value=None), patch.object(
+            main.bot, "fetch_user", new=AsyncMock(return_value=SimpleNamespace(name="Alice"))
+        ) as fetch:
+            await main.finish(session)
+        fetch.assert_awaited_once_with(10)
+        self.assertEqual(session.channel.send.await_args.kwargs["file"].filename, "10_Alice.mp3")
+        self.assertEqual(list(Path(self.record_directory.name).rglob("*.mp3"))[0].name, "10_Alice.mp3")
+
+    async def test_snapshot_name_and_separate_recordings(self):
+        for _ in range(2):
+            session = self.session()
+            session.names[10] = "Alice"
+            session.sink.audio_data[10] = discord.sinks.AudioData(io.BytesIO(b"mp3"))
+            session.sink.ready.set()
+            with patch.object(main.bot, "get_user", return_value=None), patch.object(
+                main.bot, "fetch_user", new=AsyncMock()
+            ) as fetch:
+                await main.finish(session)
+            fetch.assert_not_awaited()
+        saved = list(Path(self.record_directory.name).rglob("10_Alice.mp3"))
+        self.assertEqual(len(saved), 2)
+        self.assertNotEqual(saved[0].parent, saved[1].parent)
+
+    async def test_save_failure_does_not_prevent_upload(self):
+        session = self.session()
+        self.add_audio(session, 10)
+        session.sink.ready.set()
+        with patch.object(main.bot, "get_user", return_value=None), patch.object(
+            main, "save_audio", side_effect=PermissionError("denied")
+        ):
+            await main.finish(session)
+        session.channel.send.assert_awaited_once()
+        self.assertIn("保存に失敗", session.message.edit.await_args.kwargs["content"])
         self.assertFalse(main.sessions)
 
     async def test_empty_and_multiple_guilds(self):
@@ -93,6 +143,7 @@ class RecorderTests(unittest.IsolatedAsyncioTestCase):
         async def connect(**kwargs):
             return await target.connect(target, **kwargs)
         bound_target = Mock(spec=discord.VoiceChannel)
+        bound_target.members = []
         bound_target.permissions_for.return_value = discord.Permissions.all()
         bound_target.connect = connect
         channel = Mock(spec=discord.TextChannel)
